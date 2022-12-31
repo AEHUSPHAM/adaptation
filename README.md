@@ -2,7 +2,7 @@
 modeling_roberta.py
 ## Mask matrix
 ```python
-def momentum_matrix(n=10,m=0.9,s=0.1):
+def momentum_matrix(n=10,m=0.9,s=0.3):
     tensor=torch.Tensor([s*pow(m,i) for i in range(0,n)])
     mask_matrix=torch.cat([F.pad(tensor,(i,0),"constant",0)[:-i] if i>0 else F.pad(tensor,(i,0),"constant",0) for i in range(0,n)],dim=0).view(-1,n)
     mask_matrix = torch.transpose(mask_matrix,0,1)
