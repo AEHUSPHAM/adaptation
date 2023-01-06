@@ -230,6 +230,10 @@ class TuneArguments:
         default=None,
         metadata={},
     )
+    mask_option: str = field(
+        default=None,
+        metadata={},
+    )
 
 @dataclass
 class DataTrainingArguments:

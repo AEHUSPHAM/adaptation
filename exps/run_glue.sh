@@ -19,52 +19,52 @@ cache_dir=${TRANSFORMERS_CACHE}
 # TASK_NAME=mnli
 TASK_NAME=sst2
 metric="accuracy"
-# TASK_NAME=mnli
 # wandb env variables
-# export WANDB_PROJECT=glue.${TASK_NAME}.momentum_adaptation_sequential
-export WANDB_PROJECT=test
+export WANDB_PROJECT=momentum.adapter
 export WANDB_WATCH="false"
 
-DATE=`date +%Y%m%d%h%m%s`
+DATE=`date +%Y%m%d%h`
 
 # declare -a root_seed_list=(42 2 4 6 8)
 # seed=${root_seed_list[$SLURM_ARRAY_TASK_ID]}
+m_step_size=$1
+s_step_size=$2
+adapter_option=$3
 
-seed=42
+case ${adapter_option} in
+    sequential)
+        attn_mode="adapter"
+        attn_option="sequential"
+        attn_composition="add"
+        attn_bn=200  # attn bottleneck dim
+
+        ffn_mode="adapter"
+        ffn_option="sequential"
+        ffn_adapter_layernorm_option="none"
+        ffn_adapter_init_option="bert"
+        ffn_adapter_scalar="1"
+        ffn_bn=200 # ffn bottleneck dim
+    ;;
+    parallel)
+        attn_mode="prefix"
+        attn_option="concat"
+        attn_composition="add"
+        attn_bn=30  # attn bottleneck dim
+
+        ffn_mode="adapter"
+        ffn_option="parallel"
+        ffn_adapter_layernorm_option="none"
+        ffn_adapter_init_option="lora"
+        ffn_adapter_scalar="4"
+        ffn_bn=512 # ffn bottleneck dim
+    ;;
+esac
 
 # declare -a seed_list=(42)
-# declare -a seed_list=(42 2 4)
+declare -a seed_list=(4)
 # declare -a seed_list=(8)
 # declare -a seed_list=(6 8)
 # declare -a seed_list=(${root_seed})
-
-# # ----- MAM adapter -----
-# attn_mode="prefix"
-# attn_option="concat"
-# attn_composition="add"
-# attn_bn=30  # attn bottleneck dim
-
-# ffn_mode="adapter"
-# ffn_option="parallel"
-# ffn_adapter_layernorm_option="none"
-# ffn_adapter_init_option="lora"
-# ffn_adapter_scalar="4"
-# ffn_bn=512 # ffn bottleneck dim
-
- ----- Houlsby Adapter -----
-attn_mode="adapter"
-attn_option="sequential"
-attn_composition="add"
-attn_bn=200  # attn bottleneck dim
-
-ffn_mode="adapter"
-ffn_option="sequential"
-ffn_adapter_layernorm_option="none"
-ffn_adapter_init_option="bert"
-ffn_adapter_scalar="1"
-ffn_bn=200 # ffn bottleneck dim
-
-
 # lora params are not set
 if [ -z ${lora_alpha+x} ];
 then
@@ -80,7 +80,7 @@ debug=0
 # set to "wandb" to use weights & bias
 report_to="wandb"
 
-bsz=8
+bsz=4
 gradient_steps=1
 
 # lr=5e-5
@@ -126,17 +126,13 @@ then
     debug_str=".debug"
 fi
 
-
-
-# for seed in "${seed_list[@]}"; do
 m_step_size=$1
 s_step_size=$2
-exp_name=glue.${TASK_NAME}.am_${attn_mode}.ao_${attn_option}.fm_${ffn_mode}
-exp_name+=.fo_${ffn_option}.abn${preseqlen}.fbn${ffn_bn_len}.ac_${attn_composition}
-exp_name+=.fl_${ffn_adapter_layernorm_option}.finit_${ffn_adapter_init_option}
-exp_name+=.fs_${ffn_adapter_scalar}.unfrz_${unfreeze}.ne${num_train_epochs}
+for seed in "${seed_list[@]}"; do
+exp_name=glue.${TASK_NAME}.am_${attn_mode}.ao_${attn_option}
+exp_name+=.unfrz_${unfreeze}.ne${num_train_epochs}
 exp_name+=.warm${warmup_ratio}.wd${weight_decay}.seed${seed}.${debug_str}
-exp_name+=.m${m_step_size}.s${s_step_size}
+exp_name+=.m_${m_step_size}.s_${s_step_size}
 SAVE=checkpoints/glue/${TASK_NAME}/${DATE}/${exp_name}
 echo "${SAVE}"
 rm -rf ${SAVE}; mkdir -p ${SAVE}
@@ -144,10 +140,9 @@ rm -rf ${SAVE}; mkdir -p ${SAVE}
 rm checkpoints/hf_model/downloads/*.lock
 rm checkpoints/hf_model/*.lock
 
-
 # python -m torch.distributed.launch --nproc_per_node 2 --master_port=${port} examples/pytorch/text-classification/run_glue.py \
-
-CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
+# --max_eval_samples ${max_eval_samples} \
+CUDA_VISIBLE_DEVICES=0 python -u tasks/text-classification/run_glue.py \
     --model_name_or_path roberta-base \
     --task_name $TASK_NAME \
     --do_train \
@@ -175,7 +170,6 @@ CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
     --ffn_bn ${ffn_bn} \
     --seed ${seed} \
     --unfreeze_params ${unfreeze} \
-    --max_eval_samples ${max_eval_samples} \
     --gradient_accumulation_steps ${gradient_steps} \
     --max_steps ${max_steps} \
     --num_train_epochs ${num_train_epochs} \
@@ -195,7 +189,7 @@ CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
     --eval_steps ${save_steps} \
     --load_best_model_at_end \
     --report_to ${report_to} \
-    --run_name ${TASK_NAME}.${DATE}.${exp_name} \
+    --run_name ${TASK_NAME}.${DATE}.${exp_name}.${adapter_option}.$4 \
     --overwrite_output_dir \
     --disable_tqdm "True" \
     --metric_for_best_model ${metric} \
@@ -203,7 +197,8 @@ CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
     --ddp_find_unused_parameter "False" \
     --m_step_size ${m_step_size} \
     --s_step_size ${s_step_size} \
+    --mask_option $4 \
     --output_dir ${SAVE} ${extra_cmd} \
         2>&1 | tee ${SAVE}/log.txt
-# done
+done
 

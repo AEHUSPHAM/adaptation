@@ -46,7 +46,7 @@ from transformers.utils.versions import require_version
 
 # Change the path here based on the model
 # from model.baseline.petl_roberta_modeling import PetlRobertaForSequenceClassification
-from model.adapter1.petl_roberta_modeling  import PetlRobertaForSequenceClassification
+from model.adapter.petl_roberta_modeling  import PetlRobertaForSequenceClassification
 from petl.options import (
     GenerationArguments,
     TuneArguments,
@@ -94,6 +94,32 @@ def set_log(training_args):
         transformers.utils.logging.enable_default_handler()
         transformers.utils.logging.enable_explicit_format()
     logger.info(f"Training/evaluation parameters {training_args}")
+import torch
+def momentum_matrix(n, m, s, opt):   
+    mask_matrix = torch.zeros([n,n], dtype=torch.float32, requires_grad=False)
+    if opt == "origin":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            for j in range(1,i+1):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    elif opt== "threshold":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            for j in range(1,min(21,i+1)):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    elif opt=="slided":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            cnt=1
+            for j in range(1,i+1):
+                if cnt<3:
+                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1]
+                    cnt+=1
+                else:
+                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+                    cnt=0
+    else: return None
+    return mask_matrix
 
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, TuneArguments))
@@ -144,7 +170,7 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-
+    setattr(config, "masked_momentum_matrix", momentum_matrix(config.max_position_embeddings-2, tune_args.m_step_size, tune_args.s_step_size, tune_args.mask_option))
     # put useful args into config: these arguments will be used in models, thus adding them to config
     # interested_args = ['use_prefix', 'mid_dim', 'preseqlen', 'prefix_dropout', 'unfreeze_params']
     for k, v in vars(tune_args).items():

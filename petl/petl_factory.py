@@ -406,7 +406,8 @@ class Adapter_Layer(nn.Module):
         self.n_embd = config.d_model if d_model is None else d_model
         self.down_size = config.attn_bn if bottleneck is None else bottleneck
         # self.non_linearity = args.non_linearity  # use ReLU by default
-
+        self.attn_option = config.attn_option
+        self.attn_mode = config.attn_mode
         #_before
         self.adapter_layernorm_option = adapter_layernorm_option
 
@@ -422,7 +423,7 @@ class Adapter_Layer(nn.Module):
         self.down_proj = nn.Linear(self.n_embd, self.down_size)
         self.non_linear_func = nn.ReLU()
         self.up_proj = nn.Linear(self.down_size, self.n_embd)
-
+        self.config = config
         self.dropout = dropout
         if init_option == "bert":
             self.apply(init_bert_weights)
@@ -448,8 +449,14 @@ class Adapter_Layer(nn.Module):
         if self.adapter_layernorm_option == 'out':
             up = self.adapter_layer_norm_before(up)
 
-        if add_residual:
-            output = up + residual
+        if add_residual and self.attn_option == 'sequential':
+            # print("##############")
+            # print(self.config.masked_momentum_matrix.size())
+            # print("##############")
+            # print(up.size())
+            output = torch.matmul(self.config.masked_momentum_matrix.to(up.device),up) + residual
+        elif add_residual:
+            output = up + residual 
         else:
             output = up
 

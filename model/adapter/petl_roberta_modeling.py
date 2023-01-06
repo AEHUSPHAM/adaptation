@@ -70,13 +70,6 @@ ROBERTA_PRETRAINED_MODEL_ARCHIVE_LIST = [
     "roberta-large-openai-detector",
     # See all RoBERTa models at https://huggingface.co/models?filter=roberta
 ]
-def momentum_matrix(n, m, s):
-    tensor=torch.Tensor([s*pow(m,i) for i in range(0,n)])
-    mask_matrix = [F.pad(tensor,(i,0),"constant",0)[:-i] if i>0 else F.pad(tensor,(i,0),"constant",0) for i in range(0,n)]
-    mask_matrix=torch.cat(mask_matrix, dim=0).view(-1,n)
-    mask_matrix = torch.transpose(mask_matrix,0,1)
-    return mask_matrix
-
 class PetlRobertaEmbeddings(nn.Module):
     """
     Same as BertEmbeddings with a tiny tweak for positional embeddings indexing.
@@ -173,7 +166,7 @@ class PetlRobertaSelfAttention(nn.Module):
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
             raise ValueError(
-                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention "
+                f"The hidden size ({config.hidden_size}) is not a multiple of the number of attention ef_attn_adapter"
                 f"heads ({config.num_attention_heads})"
             )
 
@@ -210,14 +203,11 @@ class PetlRobertaSelfAttention(nn.Module):
                 self.ef_transform_layer_norm = nn.LayerNorm(config.hidden_size)
 
         elif self.attn_mode == 'adapter' and self.config.attn_option == 'parallel':
-            self.ef_attn_adapter = Adapter_Layer(d_model=config.hidden_size,
+            self.ef_attn_adapter = Adapter_Layer(config = config, d_model=config.hidden_size,
                                                  dropout=config.attention_probs_dropout_prob,
                                                  bottleneck=self.config.attn_bn,
                                                  adapter_layernorm_option="in",
                                                  )
-            self.momentum_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size)
-        # elif self.attn_mode != 'none':
-        #         raise ValueError("att_mode not supported")
 
     def transpose_for_scores(self, x):
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
@@ -405,7 +395,7 @@ class PetlRobertaSelfAttention(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
 
         if cross_attn_output is not None:
-            context_layer = context_layer + torch.matmul(self.momentum_matrix.to(cross_attn_output.device),cross_attn_output)
+            context_layer = context_layer + torch.matmul(self.config.masked_momentum_matrix.to(cross_attn_output.device),cross_attn_output)
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
@@ -425,21 +415,21 @@ class PetlRobertaSelfOutput(nn.Module):
         self.config = config
 
         if config.attn_mode == "adapter" and config.attn_option == "sequential":
-            self.ef_attn_adapter = Adapter_Layer(d_model=config.hidden_size,
+            self.ef_attn_adapter = Adapter_Layer(config = config,d_model=config.hidden_size,
                                                  dropout=config.attention_probs_dropout_prob,
                                                  bottleneck=self.config.attn_bn,
                                                  adapter_layernorm_option="in",
                                                  )
-            self.momentum_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size)
 
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
         if self.config.attn_mode == "adapter" and self.config.attn_option == "sequential":
             hidden_states = self.ef_attn_adapter(hidden_states, add_residual=True)
+       
 
         hidden_states = self.dropout(hidden_states)
-        if self.config.attn_mode == "adapter" and self.config.attn_option == "sequential":
-            hidden_states = self.LayerNorm(torch.matmul(self.momentum_matrix.to(hidden_states.device),hidden_states) + input_tensor)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+                    
         return hidden_states
 
 
@@ -530,14 +520,13 @@ class PetlRobertaOutput(nn.Module):
         self.config = config
 
         if config.ffn_mode == 'adapter':
-            self.ef_ffn_adapter = Adapter_Layer(d_model=config.hidden_size,
+            self.ef_ffn_adapter = Adapter_Layer(config = config,d_model=config.hidden_size,
                                                 dropout=config.hidden_dropout_prob,
                                                 bottleneck=config.ffn_bn,
                                                 init_option=config.ffn_adapter_init_option,
                                                 adapter_layernorm_option=config.ffn_adapter_layernorm_option,
                                                 adapter_scalar=config.ffn_adapter_scalar,
                                                 )
-            self.momentum_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size)
 
     def forward(self, hidden_states, input_tensor, adapter_change=None):
         hidden_states = self.dense(hidden_states)
@@ -551,7 +540,11 @@ class PetlRobertaOutput(nn.Module):
         if self.config.ffn_mode == 'adapter' and self.config.ffn_option == 'pfeiffer':
             h_before_residule = hidden_states
 
-        hidden_states = self.LayerNorm(torch.matmul(self.momentum_matrix.to(hidden_states.device),hidden_states) + input_tensor)
+        if self.config.ffn_option == 'parallel':
+            hidden_states = self.LayerNorm(torch.matmul(self.config.masked_momentum_matrix.to(hidden_states.device),hidden_states) + input_tensor)
+        else:
+            hidden_states = self.LayerNorm(hidden_states + input_tensor)
+
         if self.config.ffn_mode == 'adapter' and self.config.ffn_option == 'pfeiffer':
             hidden_states = self.ef_ffn_adapter(hidden_states, residual=h_before_residule)
             hidden_states = self.LayerNorm(hidden_states + input_tensor)
@@ -577,7 +570,7 @@ class PetlRobertaLayer(nn.Module):
         self.config = config
 
         if config.ffn_mode == 'adapter' and self.config.ffn_option == 'parallel':
-            self.ef_ffn_adapter = Adapter_Layer(d_model=config.hidden_size,
+            self.ef_ffn_adapter = Adapter_Layer(config = config,d_model=config.hidden_size,
                                                 dropout=config.hidden_dropout_prob,
                                                 bottleneck=config.ffn_bn,
                                                 init_option=config.ffn_adapter_init_option,
