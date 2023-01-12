@@ -395,7 +395,7 @@ class PetlRobertaSelfAttention(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
 
         if cross_attn_output is not None:
-            context_layer = context_layer + torch.matmul(self.config.masked_momentum_matrix.to(cross_attn_output.device),cross_attn_output)
+            context_layer = context_layer + torch.matmul(self.masked_matrix.to(cross_attn_output.device),cross_attn_output)
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
@@ -484,7 +484,37 @@ class PetlRobertaAttention(nn.Module):
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
-
+def momentum_matrix(n, m, s, opt):   
+    mask_matrix = torch.zeros([n,n], dtype=torch.float32, requires_grad=False)
+    if opt == "origin":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            for j in range(1,i+1):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    elif opt== "threshold":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            for j in range(1,min(21,i+1)):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    elif opt=="slided":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            cnt=1
+            for j in range(1,i+1):
+                if cnt<3:
+                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1]
+                    cnt+=1
+                else:
+                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+                    cnt=0
+    elif opt== "nesterov":
+        for i in range(n):
+            m=i/(i+3)
+            mask_matrix[i,i] = s
+            for j in range(1,i+1):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    else: return None
+    return mask_matrix
 # Copied from transformers.models.bert.modeling_bert.BertIntermediate
 class PetlRobertaIntermediate(nn.Module):
     def __init__(self, config):
@@ -527,6 +557,7 @@ class PetlRobertaOutput(nn.Module):
                                                 adapter_layernorm_option=config.ffn_adapter_layernorm_option,
                                                 adapter_scalar=config.ffn_adapter_scalar,
                                                 )
+            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size, config.mask_option)
 
     def forward(self, hidden_states, input_tensor, adapter_change=None):
         hidden_states = self.dense(hidden_states)
@@ -541,7 +572,7 @@ class PetlRobertaOutput(nn.Module):
             h_before_residule = hidden_states
 
         if self.config.ffn_option == 'parallel':
-            hidden_states = self.LayerNorm(torch.matmul(self.config.masked_momentum_matrix.to(hidden_states.device),hidden_states) + input_tensor)
+            hidden_states = self.LayerNorm(torch.matmul(self.masked_matrix.to(hidden_states.device),hidden_states) + input_tensor)
         else:
             hidden_states = self.LayerNorm(hidden_states + input_tensor)
 

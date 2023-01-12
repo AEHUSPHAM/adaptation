@@ -20,7 +20,7 @@ cache_dir=${TRANSFORMERS_CACHE}
 TASK_NAME=sst2
 metric="accuracy"
 # wandb env variables
-export WANDB_PROJECT=momentum.adapter
+export WANDB_PROJECT=momentum.adapter.mnli
 export WANDB_WATCH="false"
 
 DATE=`date +%Y%m%d%h`
@@ -61,7 +61,7 @@ case ${adapter_option} in
 esac
 
 # declare -a seed_list=(42)
-declare -a seed_list=(4)
+declare -a seed_list=(42)
 # declare -a seed_list=(8)
 # declare -a seed_list=(6 8)
 # declare -a seed_list=(${root_seed})
@@ -80,7 +80,7 @@ debug=0
 # set to "wandb" to use weights & bias
 report_to="wandb"
 
-bsz=4
+bsz=32
 gradient_steps=1
 
 # lr=5e-5
@@ -142,7 +142,7 @@ rm checkpoints/hf_model/*.lock
 
 # python -m torch.distributed.launch --nproc_per_node 2 --master_port=${port} examples/pytorch/text-classification/run_glue.py \
 # --max_eval_samples ${max_eval_samples} \
-CUDA_VISIBLE_DEVICES=0 python -u tasks/text-classification/run_glue.py \
+CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
     --model_name_or_path roberta-base \
     --task_name $TASK_NAME \
     --do_train \

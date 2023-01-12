@@ -392,7 +392,37 @@ class Bias(nn.Module):
             result.append(temp_dict)
         return
 
-
+def momentum_matrix(n, m, s, opt):   
+    mask_matrix = torch.zeros([n,n], dtype=torch.float32, requires_grad=False)
+    if opt == "origin":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            for j in range(1,i+1):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    elif opt== "threshold":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            for j in range(1,min(21,i+1)):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    elif opt=="slided":
+        for i in range(n):
+            mask_matrix[i,i] = s
+            cnt=1
+            for j in range(1,i+1):
+                if cnt<3:
+                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1]
+                    cnt+=1
+                else:
+                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+                    cnt=0
+    elif opt== "nesterov":
+        for i in range(n):
+            m=i/(i+3)
+            mask_matrix[i,i] = s
+            for j in range(1,i+1):
+                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
+    else: return None
+    return mask_matrix
 class Adapter_Layer(nn.Module):
     def __init__(self,
                  config=None,
@@ -425,6 +455,7 @@ class Adapter_Layer(nn.Module):
         self.up_proj = nn.Linear(self.down_size, self.n_embd)
         self.config = config
         self.dropout = dropout
+        self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size, config.mask_option)
         if init_option == "bert":
             self.apply(init_bert_weights)
         elif init_option == "lora":
@@ -450,11 +481,7 @@ class Adapter_Layer(nn.Module):
             up = self.adapter_layer_norm_before(up)
 
         if add_residual and self.attn_option == 'sequential':
-            # print("##############")
-            # print(self.config.masked_momentum_matrix.size())
-            # print("##############")
-            # print(up.size())
-            output = torch.matmul(self.config.masked_momentum_matrix.to(up.device),up) + residual
+            output = torch.matmul(self.masked_matrix.to(up.device),up) + residual
         elif add_residual:
             output = up + residual 
         else:
