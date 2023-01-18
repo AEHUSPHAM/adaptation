@@ -396,17 +396,17 @@ def momentum_matrix(n, m, s, opt):
     mask_matrix = torch.zeros([n,n], dtype=torch.float32, requires_grad=False)
     if opt == "origin":
         for i in range(n):
-            mask_matrix[i,i] = s
+            mask_matrix[i,i] = 1
             for j in range(1,i+1):
                 mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-    elif opt== "threshold":
+    elif opt== "threshold" or opt == "adam":
         for i in range(n):
-            mask_matrix[i,i] = s
-            for j in range(1,min(21,i+1)):
+            mask_matrix[i,i] = 1
+            for j in range(1,min(10,i+1)):
                 mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
     elif opt=="slided":
         for i in range(n):
-            mask_matrix[i,i] = s
+            mask_matrix[i,i] = 1
             cnt=1
             for j in range(1,i+1):
                 if cnt<3:
@@ -418,11 +418,16 @@ def momentum_matrix(n, m, s, opt):
     elif opt== "nesterov":
         for i in range(n):
             m=i/(i+3)
-            mask_matrix[i,i] = s
+            mask_matrix[i,i] = 1
             for j in range(1,i+1):
                 mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
     else: return None
+
+    if opt != "adam":
+        mask_matrix = s*mask_matrix
+
     return mask_matrix
+
 class Adapter_Layer(nn.Module):
     def __init__(self,
                  config=None,
@@ -455,7 +460,17 @@ class Adapter_Layer(nn.Module):
         self.up_proj = nn.Linear(self.down_size, self.n_embd)
         self.config = config
         self.dropout = dropout
-        self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size, config.mask_option)
+        
+        if config.mask_option == "adam":
+            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.beta1, config.s_step_size, config.mask_option)
+            self.mask_matrix_2 = momentum_matrix(config.max_position_embeddings-2, config.beta2, config.s_step_size, config.mask_option)
+        else: 
+            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size, config.mask_option)
+        self.s_step_size = config.s_step_size
+        self.epsilon = config.epsilon
+        self.option = config.mask_option
+        self.beta1 = config.beta1
+        self.beta2 = config.beta2
         if init_option == "bert":
             self.apply(init_bert_weights)
         elif init_option == "lora":
@@ -480,10 +495,20 @@ class Adapter_Layer(nn.Module):
         if self.adapter_layernorm_option == 'out':
             up = self.adapter_layer_norm_before(up)
 
-        if add_residual and self.attn_option == 'sequential':
+        if self.option == "adam":
+            numerator = torch.mul(1-self.beta1, torch.matmul(self.masked_matrix.to(up.device), up))
+            denominator = torch.matmul(self.mask_matrix_2.to(up.device), torch.mul(up,up))
+            denominator = torch.sqrt(torch.mul(1-self.beta2, denominator)+self.epsilon)
+
+            output = torch.mul(self.s_step_size, torch.div(numerator, denominator)) + residual
+
+        elif add_residual and self.attn_option == 'sequential':
             output = torch.matmul(self.masked_matrix.to(up.device),up) + residual
+
+
         elif add_residual:
             output = up + residual 
+
         else:
             output = up
 

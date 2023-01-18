@@ -1,12 +1,13 @@
-for x in nesterov
+
+for x in adam
 do
-    for option in sequential
+    for m1 in 0.3 0.6
     do
-        for i in 0.3
+        for m2 in 0.6 0.9
         do
-            for j in 0.6
+            for s in 0.1 2 
             do
-                bash exps/run_glue.sh $i $j $option $x
+                bash exps/run_glue.sh $m1 $m2 $s sequential $x
             done 
         done
     done

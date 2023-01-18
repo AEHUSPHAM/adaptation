@@ -234,6 +234,18 @@ class TuneArguments:
         default=None,
         metadata={},
     )
+    beta1: float = field(
+        default=None,
+        metadata={},
+    )
+    beta2: float = field(
+        default=None,
+        metadata={},
+    )
+    epsilon: float = field(
+        default=None,
+        metadata={},
+    )
 
 @dataclass
 class DataTrainingArguments:

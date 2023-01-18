@@ -20,7 +20,7 @@ cache_dir=${TRANSFORMERS_CACHE}
 TASK_NAME=sst2
 metric="accuracy"
 # wandb env variables
-export WANDB_PROJECT=momentum.adapter.mnli
+export WANDB_PROJECT=momentum.adapter.adam
 export WANDB_WATCH="false"
 
 DATE=`date +%Y%m%d%h`
@@ -28,8 +28,9 @@ DATE=`date +%Y%m%d%h`
 # declare -a root_seed_list=(42 2 4 6 8)
 # seed=${root_seed_list[$SLURM_ARRAY_TASK_ID]}
 m_step_size=$1
-s_step_size=$2
-adapter_option=$3
+beta_2=$2
+s_step_size=$3
+adapter_option=$4
 
 case ${adapter_option} in
     sequential)
@@ -80,7 +81,7 @@ debug=0
 # set to "wandb" to use weights & bias
 report_to="wandb"
 
-bsz=32
+bsz=16
 gradient_steps=1
 
 # lr=5e-5
@@ -126,13 +127,11 @@ then
     debug_str=".debug"
 fi
 
-m_step_size=$1
-s_step_size=$2
 for seed in "${seed_list[@]}"; do
 exp_name=glue.${TASK_NAME}.am_${attn_mode}.ao_${attn_option}
 exp_name+=.unfrz_${unfreeze}.ne${num_train_epochs}
 exp_name+=.warm${warmup_ratio}.wd${weight_decay}.seed${seed}.${debug_str}
-exp_name+=.m_${m_step_size}.s_${s_step_size}
+exp_name+=.m_${m_step_size}.beta2_${beta_2}.s_${s_step_size}
 SAVE=checkpoints/glue/${TASK_NAME}/${DATE}/${exp_name}
 echo "${SAVE}"
 rm -rf ${SAVE}; mkdir -p ${SAVE}
@@ -142,7 +141,7 @@ rm checkpoints/hf_model/*.lock
 
 # python -m torch.distributed.launch --nproc_per_node 2 --master_port=${port} examples/pytorch/text-classification/run_glue.py \
 # --max_eval_samples ${max_eval_samples} \
-CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
+CUDA_VISIBLE_DEVICES=0,1 python -u tasks/text-classification/run_glue.py \
     --model_name_or_path roberta-base \
     --task_name $TASK_NAME \
     --do_train \
@@ -180,7 +179,6 @@ CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
     --warmup_steps ${warmup_updates} \
     --warmup_ratio ${warmup_ratio} \
     --max_seq_length ${max_seq_length} \
-    --fp16 \
     --logging_steps ${logging_steps} \
     --save_total_limit 2 \
     --evaluation_strategy ${eval_strategy} \
@@ -189,7 +187,7 @@ CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
     --eval_steps ${save_steps} \
     --load_best_model_at_end \
     --report_to ${report_to} \
-    --run_name ${TASK_NAME}.${DATE}.${exp_name}.${adapter_option}.$4 \
+    --run_name ${TASK_NAME}.${DATE}.${exp_name}.${adapter_option}.$5 \
     --overwrite_output_dir \
     --disable_tqdm "True" \
     --metric_for_best_model ${metric} \
@@ -197,7 +195,10 @@ CUDA_VISIBLE_DEVICES=1 python -u tasks/text-classification/run_glue.py \
     --ddp_find_unused_parameter "False" \
     --m_step_size ${m_step_size} \
     --s_step_size ${s_step_size} \
-    --mask_option $4 \
+    --mask_option $5 \
+    --beta1 ${m_step_size} \
+    --beta2 ${beta_2} \
+    --epsilon 1e-16 \
     --output_dir ${SAVE} ${extra_cmd} \
         2>&1 | tee ${SAVE}/log.txt
 done
