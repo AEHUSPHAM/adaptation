@@ -63,10 +63,6 @@ class PETLEncDecModel(PreTrainedModel):
             if len(freeze_set) > 0 and self.check_params(n, freeze_set, all_match=False):
                 p.requires_grad = False
 
-        # num_params_seq2seq = sum([p.numel() for n, p in self.seq2seq_model.named_parameters()])
-        # num_params_pt = sum([p.numel() for n, p in self.seq2seq_model.named_parameters() if p.requires_grad])
-        # num_params_pt = sum([p.numel() for n, p in self.prompt_model.named_parameters()])
-        # print("num_params_seq2seq = {}, num_params_pt = {}, ratio = {}".format(num_params_seq2seq, num_params_pt, num_params_pt*1.0/num_params_seq2seq))
         logger.info("already freezed parameters!")
         # input()
 

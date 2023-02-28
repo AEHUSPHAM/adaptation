@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import math
 
 from transformers import RobertaConfig
+from petl.momentum_matrix import momentum_matrix
 
 def init_lisa_params(module):
     std = 1e-20
@@ -323,10 +324,6 @@ class MLP_Bias(nn.Module):
             nn.Linear(self.mid_dim, self.match_n_layer * self.n_embd))
 
         self.apply(init_bias_mlp)
-        # # initialization
-        # nn.init.constant_(self.wte.weight, 0.0)
-        # nn.init.constant_(self.wte_enc.weight, 0.0)
-        # nn.init.constant_(self.wte2.weight, 0.0)
 
     def forward(self, bsz, nsamples=1, device="cuda"):
         temp_control = self.wte(self.tgt_input_tokens.to(device))
@@ -391,43 +388,7 @@ class Bias(nn.Module):
                          "encoder_decoder": self.decoder_cross_attn_bias[ii].forward(tgt_positions)}
             result.append(temp_dict)
         return
-
-def momentum_matrix(n, m, s, opt):   
-    mask_matrix = torch.zeros([n,n], dtype=torch.float32, requires_grad=False)
-    if opt == "origin":
-        for i in range(n):
-            mask_matrix[i,i] = 1
-            for j in range(1,i+1):
-                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-    elif opt== "threshold" or opt == "adam":
-        for i in range(n):
-            mask_matrix[i,i] = 1
-            for j in range(1,min(10,i+1)):
-                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-    elif opt=="slided":
-        for i in range(n):
-            mask_matrix[i,i] = 1
-            cnt=1
-            for j in range(1,i+1):
-                if cnt<3:
-                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1]
-                    cnt+=1
-                else:
-                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-                    cnt=0
-    elif opt== "nesterov":
-        for i in range(n):
-            m=i/(i+3)
-            mask_matrix[i,i] = 1
-            for j in range(1,i+1):
-                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-    else: return None
-
-    if opt != "adam":
-        mask_matrix = s*mask_matrix
-
-    return mask_matrix
-
+  
 class Adapter_Layer(nn.Module):
     def __init__(self,
                  config=None,
@@ -460,17 +421,10 @@ class Adapter_Layer(nn.Module):
         self.up_proj = nn.Linear(self.down_size, self.n_embd)
         self.config = config
         self.dropout = dropout
-        
-        if config.mask_option == "adam":
-            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.beta1, config.s_step_size, config.mask_option)
-            self.mask_matrix_2 = momentum_matrix(config.max_position_embeddings-2, config.beta2, config.s_step_size, config.mask_option)
-        else: 
-            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size, config.mask_option)
-        self.s_step_size = config.s_step_size
-        self.epsilon = config.epsilon
-        self.option = config.mask_option
-        self.beta1 = config.beta1
-        self.beta2 = config.beta2
+        if config.mask_option == "learnable":
+            self.masked_matrix = nn.Linear(config.max_position_embeddings-2, config.max_position_embeddings-2)
+        else:
+            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.beta2, config.s_step_size, config.mask_option)
         if init_option == "bert":
             self.apply(init_bert_weights)
         elif init_option == "lora":
@@ -494,26 +448,17 @@ class Adapter_Layer(nn.Module):
 
         if self.adapter_layernorm_option == 'out':
             up = self.adapter_layer_norm_before(up)
+        # else:
+        
+        if self.attn_option == "sequential":
+            up = self.masked_matrix.weight @ up 
 
-        if self.option == "adam":
-            numerator = torch.mul(1-self.beta1, torch.matmul(self.masked_matrix.to(up.device), up))
-            denominator = torch.matmul(self.mask_matrix_2.to(up.device), torch.mul(up,up))
-            denominator = torch.sqrt(torch.mul(1-self.beta2, denominator)+self.epsilon)
-
-            output = torch.mul(self.s_step_size, torch.div(numerator, denominator)) + residual
-
-        elif add_residual and self.attn_option == 'sequential':
-            output = torch.matmul(self.masked_matrix.to(up.device),up) + residual
-
-
-        elif add_residual:
+        if add_residual:
             output = up + residual 
-
         else:
             output = up
 
         return output
-
 
 def softmax_gating(logits_1, logits_2):
     # the last two dimensions of logits is (T, S)
@@ -527,35 +472,6 @@ def softmax_gating(logits_1, logits_2):
     w2 = torch.sum(exp_logits_2, dim=-1) / s  # bsz x num_heads, tgt_len
 
     return w1.unsqueeze(-1), w2.unsqueeze(-1)
-
-
-
-def adapter_func(x, down_w, up_w, layernorm, training, dropout=0.0, add_residual=True, layernorm_option="in"):
-    residual = x
-
-    if layernorm is not None and layernorm_option == "in":
-        x = layernorm(x)
-    # print("x", x.size())
-    # print(x)
-    # input()
-    # print("down w", down_w.size())
-    # print(down_w)
-    # input()
-    down = x @ down_w
-    # print("down", down.size())
-    # print(down)
-    # input()
-    down = nn.functional.relu(down)
-    down = nn.functional.dropout(down, p=dropout, training=training)
-    up = down @ up_w
-
-    if layernorm is not None and layernorm_option == "out":
-        up = layernorm(x)
-    if add_residual:
-        output = up + residual
-    else:
-        output = up
-    return output
 
 # copied from LoRA: https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 class LoRALayer():
@@ -591,6 +507,11 @@ class Linear(nn.Linear, LoRALayer):
             # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
             merge_weights: bool = True,
             lora_init: str="lora",
+            beta1: float = 0., 
+            beta2: float = 0., 
+            s_step_size: float = 0., 
+            mask_option: str="origin", 
+            d_model: int = 0,
             **kwargs
     ):
         nn.Linear.__init__(self, in_features, out_features, **kwargs)
@@ -599,6 +520,11 @@ class Linear(nn.Linear, LoRALayer):
 
         self.lora_init = lora_init
         self.fan_in_fan_out = fan_in_fan_out
+        self.beta1 = beta1
+        self.beta2 = beta2
+        self.s_step_size = s_step_size
+        self.mask_option = mask_option
+        self.d_model = d_model
         # Actual trainable parameters
         if r > 0:
             self.ef_lora_A = nn.Parameter(self.weight.new_zeros((r, in_features)))
@@ -607,6 +533,7 @@ class Linear(nn.Linear, LoRALayer):
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
         self.reset_parameters()
+        self.mask_matrix = momentum_matrix(self.d_model, self.beta1, self.beta2, self.s_step_size, self.mask_option)
         if fan_in_fan_out:
             self.weight.data = self.weight.data.T
 
@@ -629,7 +556,7 @@ class Linear(nn.Linear, LoRALayer):
         if self.merge_weights and self.merged:
             # Make sure that the weights are not merged
             if self.r > 0:
-                self.weight.data -= T(self.ef_lora_B @ self.ef_lora_A) * self.scaling
+                self.weight.data -= T(self.mask_matrix @ (self.ef_lora_B @ self.ef_lora_A)) * self.scaling
             self.merged = False
 
     def eval(self):
@@ -640,7 +567,7 @@ class Linear(nn.Linear, LoRALayer):
         if self.merge_weights and not self.merged:
             # Merge the weights and mark it
             if self.r > 0:
-                self.weight.data += T(self.ef_lora_B @ self.ef_lora_A) * self.scaling
+                self.weight.data += T(self.mask_matrix @ (self.ef_lora_B @ self.ef_lora_A)) * self.scaling
             self.merged = True
 
     def forward(self, x: torch.Tensor):
@@ -650,7 +577,25 @@ class Linear(nn.Linear, LoRALayer):
         if self.r > 0 and not self.merged:
             result = F.linear(x, T(self.weight), bias=self.bias)
             if self.r > 0:
-                result += (self.lora_dropout(x) @ self.ef_lora_A.T @ self.ef_lora_B.T) * self.scaling
+                result += torch.matmul(self.mask_matrix.to(result.device), self.lora_dropout(x) @ self.ef_lora_A.T @ self.ef_lora_B.T) * self.scaling 
             return result
         else:
             return F.linear(x, T(self.weight), bias=self.bias)
+
+def adapter_func(x, down_w, up_w, layernorm, training, dropout=0.0, add_residual=True, layernorm_option="in"):
+    residual = x
+
+    if layernorm is not None and layernorm_option == "in":
+        x = layernorm(x)
+    down = x @ down_w
+    down = nn.functional.relu(down)
+    down = nn.functional.dropout(down, p=dropout, training=training)
+    up = down @ up_w
+
+    if layernorm is not None and layernorm_option == "out":
+        up = layernorm(x)
+    if add_residual:
+        output = up + residual
+    else:
+        output = up
+    return output

@@ -20,7 +20,7 @@ cache_dir=${TRANSFORMERS_CACHE}
 TASK_NAME=sst2
 metric="accuracy"
 # wandb env variables
-export WANDB_PROJECT=momentum.adapter.adam
+export WANDB_PROJECT=momentum.adapter.bidirectional
 export WANDB_WATCH="false"
 
 DATE=`date +%Y%m%d%h`
@@ -37,7 +37,7 @@ case ${adapter_option} in
         attn_mode="adapter"
         attn_option="sequential"
         attn_composition="add"
-        attn_bn=200  # attn bottleneck dim
+        attn_bn=200 # attn bottleneck dim
 
         ffn_mode="adapter"
         ffn_option="sequential"
@@ -57,14 +57,32 @@ case ${adapter_option} in
         ffn_adapter_layernorm_option="none"
         ffn_adapter_init_option="lora"
         ffn_adapter_scalar="4"
-        ffn_bn=512 # ffn bottleneck dim
+        ffn_bn=512 # ffn bottleneck dim 
+    ;;
+    lora)
+        # ----- lora -----
+        attn_mode="lora"
+        attn_option="none"
+        attn_composition="add"
+        attn_bn=16
+
+        # set ffn_mode to be 'lora' to use
+        # lora at ffn as well
+
+        ffn_mode="none"
+        ffn_option="none"
+        ffn_adapter_layernorm_option="none"
+        ffn_adapter_init_option="bert"
+        ffn_adapter_scalar="1"
+        ffn_bn=16
+
+        lora_alpha=32
+        lora_dropout=0.1
+        lora_init="lora"
     ;;
 esac
 
-# declare -a seed_list=(42)
-declare -a seed_list=(42)
-# declare -a seed_list=(8)
-# declare -a seed_list=(6 8)
+declare -a seed_list=(4)
 # declare -a seed_list=(${root_seed})
 # lora params are not set
 if [ -z ${lora_alpha+x} ];
@@ -81,7 +99,7 @@ debug=0
 # set to "wandb" to use weights & bias
 report_to="wandb"
 
-bsz=16
+bsz=32
 gradient_steps=1
 
 # lr=5e-5
@@ -131,7 +149,7 @@ for seed in "${seed_list[@]}"; do
 exp_name=glue.${TASK_NAME}.am_${attn_mode}.ao_${attn_option}
 exp_name+=.unfrz_${unfreeze}.ne${num_train_epochs}
 exp_name+=.warm${warmup_ratio}.wd${weight_decay}.seed${seed}.${debug_str}
-exp_name+=.m_${m_step_size}.beta2_${beta_2}.s_${s_step_size}
+exp_name+=.m_${m_step_size}.beta2_${beta_2}.s_${s_step_size}.layernorm
 SAVE=checkpoints/glue/${TASK_NAME}/${DATE}/${exp_name}
 echo "${SAVE}"
 rm -rf ${SAVE}; mkdir -p ${SAVE}

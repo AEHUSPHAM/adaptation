@@ -1,13 +1,13 @@
 
-for x in adam
+for x in bidirectional
 do
-    for m1 in 0.3 0.6
+    for m1 in 0.3
     do
-        for m2 in 0.6 0.9
+        for m2 in 0.2
         do
-            for s in 0.1 2 
+            for s in 1
             do
-                bash exps/run_glue.sh $m1 $m2 $s sequential $x
+                bash exps/run_glue.sh $m1 $m2 $s lora $x
             done 
         done
     done

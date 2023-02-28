@@ -54,6 +54,7 @@ import sys
 sys.path.insert(2, "./")
 
 # Import local
+from petl.momentum_matrix import momentum_matrix
 from petl.petl_factory import Adapter_Layer, softmax_gating, Linear
 logger = logging.get_logger(__name__)
 
@@ -176,9 +177,9 @@ class PetlRobertaSelfAttention(nn.Module):
 
         if config.attn_mode == "lora":
             self.query = Linear(config.hidden_size, self.all_head_size, r=config.attn_bn, lora_alpha=config.lora_alpha,
-                                 lora_dropout=config.lora_dropout, lora_init=config.lora_init)
+                                 lora_dropout=config.lora_dropout, lora_init=config.lora_init, beta1 = config.beta1, beta2 = config.beta2, s_step_size = config.s_step_size, mask_option = config.mask_option, d_model = config.max_position_embeddings-2)
             self.value = Linear(config.hidden_size, self.all_head_size, r=config.attn_bn, lora_alpha=config.lora_alpha,
-                                 lora_dropout=config.lora_dropout, lora_init=config.lora_init)
+                                 lora_dropout=config.lora_dropout, lora_init=config.lora_init, beta1 = config.beta1, beta2 = config.beta2, s_step_size = config.s_step_size, mask_option = config.mask_option, d_model = config.max_position_embeddings-2)
         else:
             self.query = nn.Linear(config.hidden_size, self.all_head_size)
             self.value = nn.Linear(config.hidden_size, self.all_head_size)
@@ -256,13 +257,6 @@ class PetlRobertaSelfAttention(nn.Module):
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
         if self.is_decoder:
-            # if cross_attention save Tuple(torch.Tensor, torch.Tensor) of all cross attention key/value_states.
-            # Further calls to cross_attention layer can then reuse all cross-attention
-            # key/value_states (first "if" case)
-            # if uni-directional self-attention (decoder) save Tuple(torch.Tensor, torch.Tensor) of
-            # all previous decoder key/value_states. Further calls to uni-directional self-attention
-            # can concat previous decoder key/value_states to current projected key/value_states (third "elif" case)
-            # if encoder bi-directional self-attention `past_key_value` is always `None`
             past_key_value = (key_layer, value_layer)
 
         cross_attn_output = None
@@ -278,13 +272,8 @@ class PetlRobertaSelfAttention(nn.Module):
 
             # import pdb; pdb.set_trace()
             if self.config.attn_option == 'concat':
-                # original lisa prefix-tuning
-                # if self.cache_key == "self":
-                #     key_states = torch.cat([key_states[:, 0, :].unsqueeze(1), prefix_key, key_states[:, 1:, :]], dim=1)
-                #     value_states = torch.cat([value_states[:, 0, :].unsqueeze(1), prefix_value, value_states[:, 1:, :]], dim=1)
-                # else:
-                key_layer = torch.cat([prefix_key, key_layer], dim=2)
-                value_layer = torch.cat([prefix_value, value_layer], dim=2)
+                key_layer = torch.cat([prefix_key.to(key_layer.device), key_layer], dim=2)
+                value_layer = torch.cat([prefix_value.to(value_layer.device), value_layer], dim=2)
 
                 # import pdb; pdb.set_trace()
                 if attention_mask is not None:
@@ -292,7 +281,7 @@ class PetlRobertaSelfAttention(nn.Module):
                     expanded_prefix_mask = prefix_mask[:, None, None, :].expand(bsz, 1, attention_mask.size(2),
                                                                                 prefix_mask.size(1)).to(
                         attention_mask.dtype)
-                    attention_mask = torch.cat([expanded_prefix_mask, attention_mask], dim=-1)
+                    attention_mask = torch.cat([expanded_prefix_mask.to(attention_mask.device), attention_mask], dim=-1)
 
             elif self.config.attn_option == "cross_attn" or self.config.attn_option == "cross_attn_noln" \
                 or self.config.attn_option == "cross_attn_relu":
@@ -301,9 +290,6 @@ class PetlRobertaSelfAttention(nn.Module):
                     cross_query_states = query_layer
                 elif self.config.attn_option == "cross_attn_relu":
                     cross_query_states = query_layer
-                    # cross_hidden = self.ef_transform_layer_norm(hidden_states)
-                    # cross_query_states = self.q_proj(cross_hidden)
-                    # cross_query_states = self._shape(cross_query_states, tgt_len, bsz).view(*proj_shape)
                 else:
                     cross_hidden = self.ef_transform_layer_norm(hidden_states)
                     cross_query_states = self.query(cross_hidden)
@@ -395,7 +381,7 @@ class PetlRobertaSelfAttention(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
 
         if cross_attn_output is not None:
-            context_layer = context_layer + torch.matmul(self.masked_matrix.to(cross_attn_output.device),cross_attn_output)
+            context_layer = context_layer + (self.masked_matrix.to(cross_attn_output.device) @ cross_attn_output)
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
@@ -484,44 +470,13 @@ class PetlRobertaAttention(nn.Module):
         outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
         return outputs
 
-def momentum_matrix(n, m, s, opt):   
-    mask_matrix = torch.zeros([n,n], dtype=torch.float32, requires_grad=False)
-    if opt == "origin":
-        for i in range(n):
-            mask_matrix[i,i] = s
-            for j in range(1,i+1):
-                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-    elif opt== "threshold":
-        for i in range(n):
-            mask_matrix[i,i] = s
-            for j in range(1,min(21,i+1)):
-                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-    elif opt=="slided":
-        for i in range(n):
-            mask_matrix[i,i] = s
-            cnt=1
-            for j in range(1,i+1):
-                if cnt<3:
-                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1]
-                    cnt+=1
-                else:
-                    mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-                    cnt=0
-    elif opt== "nesterov":
-        for i in range(n):
-            m=i/(i+3)
-            mask_matrix[i,i] = s
-            for j in range(1,i+1):
-                mask_matrix[i,i-j] = mask_matrix[i,i-j+1] * m
-    else: return None
-    return mask_matrix
 # Copied from transformers.models.bert.modeling_bert.BertIntermediate
 class PetlRobertaIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
         if config.ffn_mode == 'lora':
             self.dense = Linear(config.hidden_size, config.intermediate_size, r=config.ffn_bn, lora_alpha=config.lora_alpha,
-                              lora_dropout=config.lora_dropout, lora_init=config.lora_init)
+                              lora_dropout=config.lora_dropout, lora_init=config.lora_init, beta1 = config.beta1, beta2 = config.beta2, s_step_size = config.s_step_size, mask_option = config.mask_option, d_model = config.max_position_embeddings-2)
         else:
             self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
         if isinstance(config.hidden_act, str):
@@ -541,7 +496,7 @@ class PetlRobertaOutput(nn.Module):
         super().__init__()
         if config.ffn_mode == 'lora':
             self.dense = Linear(config.intermediate_size, config.hidden_size, r=config.ffn_bn, lora_alpha=config.lora_alpha,
-                              lora_dropout=config.lora_dropout, lora_init=config.lora_init)
+                              lora_dropout=config.lora_dropout, lora_init=config.lora_init, beta1 = config.beta1, beta2 = config.beta2, s_step_size = config.s_step_size, mask_option = config.mask_option, d_model = config.max_position_embeddings-2)
         else:
             self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
@@ -557,7 +512,7 @@ class PetlRobertaOutput(nn.Module):
                                                 adapter_layernorm_option=config.ffn_adapter_layernorm_option,
                                                 adapter_scalar=config.ffn_adapter_scalar,
                                                 )
-            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.s_step_size, config.mask_option)
+            self.masked_matrix = momentum_matrix(config.max_position_embeddings-2, config.m_step_size, config.beta2, config.s_step_size, config.mask_option)
 
     def forward(self, hidden_states, input_tensor, adapter_change=None):
         hidden_states = self.dense(hidden_states)
